@@ -1,9 +1,11 @@
+import fs from 'fs';
 import { Bot, InputFile } from 'grammy';
 import { config } from './config.js';
 import { startHealthServer } from './server.js';
 import { startPeriodicCleaner, cleanupFolder } from './cleaner.js';
 import { TaskQueue } from './queue.js';
 import { downloadMedia } from './downloader.js';
+import { ProgressReporter, createProgressStream, formatProgressBar, formatBytes } from './progress.js';
 
 if (!config.botToken) {
   console.error('[Bot] FATAL: BOT_TOKEN is missing. Please set the BOT_TOKEN environment variable.');
@@ -51,7 +53,7 @@ bot.command(['start', 'help'], async (ctx) => {
     `🚀 <b>How to use:</b>\n` +
     `• Send any supported media link (YouTube, Instagram, TikTok, X/Twitter, Reddit, Pinterest, etc.)\n` +
     `• To download <b>Audio only (MP3)</b>: Send <code>/audio &lt;url&gt;</code> or include <code>#audio</code> with your link.\n\n` +
-    `⚡ <i>Lightweight, database-less, and fast with instant disk cleanup.</i>`;
+    `⚡ <i>Real-time progress, database-less, and fast with instant disk cleanup.</i>`;
   await ctx.reply(welcomeText, { parse_mode: 'HTML' });
 });
 
@@ -102,7 +104,7 @@ function extractUrl(text) {
 }
 
 /**
- * Handles queueing, downloading, sending, and cleaning up a media request.
+ * Handles queueing, downloading, sending, and cleaning up a media request with live progress.
  * @param {import('grammy').Context} ctx
  * @param {string} url
  * @param {object} options
@@ -118,36 +120,60 @@ async function processDownload(ctx, url, options = {}) {
     console.error('[Bot] Failed to send initial status message:', err.message);
   }
 
+  const reporter = new ProgressReporter(ctx, statusMsg, 2000);
+
   // Enqueue task to prevent memory saturation
   await queue.add(async () => {
     let downloadResult = null;
     try {
-      if (statusMsg) {
-        await ctx.api
-          .editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            `⚡ <b>Downloading:</b> Fetching media via yt-dlp...`,
-            { parse_mode: 'HTML' }
-          )
-          .catch(() => {});
-      }
+      await reporter.update(`⚡ <b>Downloading:</b> Initializing yt-dlp...`, true);
 
-      downloadResult = await downloadMedia(url, options);
+      downloadResult = await downloadMedia(url, {
+        ...options,
+        onProgress: (p) => {
+          if (p.phase === 'downloading') {
+            const bar = formatProgressBar(p.percent);
+            const total = p.totalStr ? ` | <b>Size:</b> ${p.totalStr}` : '';
+            const speed = p.speedStr ? ` | <b>Speed:</b> ${p.speedStr}` : '';
+            const eta = p.etaStr ? ` | <b>ETA:</b> ${p.etaStr}` : '';
 
-      if (statusMsg) {
-        await ctx.api
-          .editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            `📤 <b>Uploading:</b> Sending to Telegram...`,
-            { parse_mode: 'HTML' }
-          )
-          .catch(() => {});
-      }
+            reporter.update(
+              `⚡ <b>Downloading Media...</b>\n` +
+              `<code>[${bar}] ${p.percent.toFixed(1)}%</code>\n` +
+              `📊${total}${speed}${eta}`
+            );
+          } else if (p.phase === 'processing') {
+            reporter.update(`🔄 <b>Processing Media:</b> Finalizing codecs for Telegram playback...`, true);
+          }
+        },
+      });
 
-      const inputFile = new InputFile(downloadResult.filePath, downloadResult.fileName);
+      await reporter.update(
+        `📤 <b>Uploading to Telegram...</b>\n` +
+        `<code>[${formatProgressBar(0)}] 0.0%</code>\n` +
+        `📊 <b>Size:</b> ${formatBytes(downloadResult.fileSizeBytes)}`,
+        true
+      );
+
       const titleCaption = `🎬 <b>${escapeHtml(downloadResult.title)}</b>\n🔗 <a href="${url}">Source Link</a>`;
+
+      // Set up streaming upload with real-time progress tracker
+      const fileStream = fs.createReadStream(downloadResult.filePath);
+      const progressStream = createProgressStream(downloadResult.fileSizeBytes, (p) => {
+        const bar = formatProgressBar(p.percent);
+        const uploaded = formatBytes(p.uploadedBytes);
+        const total = formatBytes(p.totalBytes);
+        const speed = `${formatBytes(p.speedBytesPerSec)}/s`;
+
+        reporter.update(
+          `📤 <b>Uploading to Telegram...</b>\n` +
+          `<code>[${bar}] ${p.percent.toFixed(1)}%</code>\n` +
+          `📊 <b>Uploaded:</b> ${uploaded} / ${total} | <b>Speed:</b> ${speed}`
+        );
+      });
+
+      const uploadStream = fileStream.pipe(progressStream);
+      const inputFile = new InputFile(uploadStream, downloadResult.fileName);
 
       if (downloadResult.isAudio) {
         await ctx.replyWithAudio(inputFile, {
@@ -176,7 +202,8 @@ async function processDownload(ctx, url, options = {}) {
           await ctx.replyWithVideo(inputFile, videoOptions);
         } catch (videoErr) {
           console.warn('[Bot] replyWithVideo failed, falling back to replyWithDocument:', videoErr.message);
-          await ctx.replyWithDocument(inputFile, {
+          const fallbackFile = new InputFile(downloadResult.filePath, downloadResult.fileName);
+          await ctx.replyWithDocument(fallbackFile, {
             caption: titleCaption,
             parse_mode: 'HTML',
             reply_parameters: { message_id: ctx.message?.message_id || ctx.msgId },
@@ -184,11 +211,14 @@ async function processDownload(ctx, url, options = {}) {
         }
       }
 
+      reporter.finish();
+
       // Delete status message on success
       if (statusMsg) {
         await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
       }
     } catch (err) {
+      reporter.finish();
       console.error(`[Bot] Error downloading ${url}:`, err.message);
       const errorText = `❌ <b>Download Failed:</b>\n<code>${escapeHtml(err.message)}</code>`;
       if (statusMsg) {

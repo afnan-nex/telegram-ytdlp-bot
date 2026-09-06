@@ -73,9 +73,9 @@ export async function generateThumbnail(videoPath, thumbnailPath) {
 }
 
 /**
- * Downloads media from URL and returns file details with full Telegram compatibility.
+ * Downloads media from URL and returns file details with full Telegram compatibility and progress tracking.
  * @param {string} url - Target media URL
- * @param {object} options - Options { audioOnly: boolean }
+ * @param {object} options - Options { audioOnly: boolean, onProgress: (data: any) => void }
  * @returns {Promise<{ filePath: string, fileName: string, title: string, uploader: string, duration?: number, width?: number, height?: number, thumbnailPath?: string, fileSizeBytes: number, isAudio: boolean, dirPath: string }>}
  */
 export async function downloadMedia(url, options = {}) {
@@ -91,6 +91,7 @@ export async function downloadMedia(url, options = {}) {
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificates',
+    '--newline',
     '--max-filesize', `${config.maxFileSizeMB}M`,
     '-o', outputTemplate,
   ];
@@ -121,6 +122,30 @@ export async function downloadMedia(url, options = {}) {
     const proc = spawn('yt-dlp', args);
 
     let stderr = '';
+    const downloadRegex = /\[download\]\s+([\d\.]+)%\s+of\s+~?\s*([\d\.]+\w+)(?:\s+at\s+([\d\.]+\w+\/s))?(?:\s+ETA\s+([\d:]+))?/;
+
+    proc.stdout.on('data', (data) => {
+      const text = data.toString();
+      const lines = text.split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const match = line.match(downloadRegex);
+        if (match && options.onProgress) {
+          options.onProgress({
+            phase: 'downloading',
+            percent: parseFloat(match[1]),
+            totalStr: match[2],
+            speedStr: match[3] || '',
+            etaStr: match[4] || '',
+          });
+        } else if ((line.includes('[Merger]') || line.includes('[VideoConvertor]') || line.includes('[ExtractAudio]')) && options.onProgress) {
+          options.onProgress({
+            phase: 'processing',
+            percent: 100,
+          });
+        }
+      }
+    });
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString();
