@@ -1,0 +1,28 @@
+{
+  "name": "telegram-ytdlp-bot",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight Node.js Telegram Media Downloader Bot powered by yt-dlp and ffmpeg",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "yt-dlp",
+    "youtube-dl",
+    "media-downloader",
+    "video-downloader"
+  ],
+  "author": "afnan-nex",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
