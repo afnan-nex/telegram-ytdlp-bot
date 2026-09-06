@@ -18,6 +18,7 @@ const parseAllowedUsers = (envVal) => {
 
 export const config = {
   botToken: botToken || '',
+  botApiUrl: process.env.BOT_API_URL || '',
   port: parseInt(process.env.PORT || '8080', 10),
   allowedUsers: parseAllowedUsers(process.env.ALLOWED_USERS || process.env.ALLOWED_USER_IDS || ''),
   maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || '50', 10),

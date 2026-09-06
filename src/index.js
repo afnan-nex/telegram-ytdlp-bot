@@ -20,7 +20,14 @@ startPeriodicCleaner(config.downloadDir);
 const queue = new TaskQueue(config.maxConcurrentDownloads);
 
 // Create Telegram Bot instance
-const bot = new Bot(config.botToken);
+const botOptions = {};
+if (config.botApiUrl) {
+  botOptions.client = {
+    apiRoot: config.botApiUrl,
+  };
+  console.log(`[Bot] Using custom Bot API URL: ${config.botApiUrl}`);
+}
+const bot = new Bot(config.botToken, botOptions);
 
 // Security middleware for personal use (optional whitelist)
 bot.use(async (ctx, next) => {
