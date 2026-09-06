@@ -245,21 +245,60 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;');
 }
 
-// Global error handler
+// Global error handlers
 bot.catch((err) => {
+  if (err?.error?.error_code === 409 || err?.message?.includes('409') || err?.error?.description?.includes('Conflict')) {
+    console.warn('[Bot] Ignored 409 Conflict error.');
+    return;
+  }
   console.error(`[Bot Error] Unhandled error in bot event handler:`, err.error || err);
 });
 
-// Start Telegram bot polling
-bot.start({
-  drop_pending_updates: true,
-  onStart: (botInfo) => {
-    console.log(`[Bot] Successfully started @${botInfo.username}`);
-  },
+process.on('unhandledRejection', (reason) => {
+  if (reason?.error_code === 409 || reason?.message?.includes('409') || reason?.description?.includes('Conflict')) {
+    console.warn('[Bot] Ignored 409 Conflict in unhandled rejection.');
+    return;
+  }
+  console.error('[Process] Unhandled Rejection:', reason);
 });
+
+// Resilient polling startup that ignores 409 Conflict and resumes automatically
+let isShuttingDown = false;
+
+function startPolling() {
+  if (isShuttingDown) return;
+
+  bot
+    .start({
+      drop_pending_updates: true,
+      allowed_updates: ['message', 'callback_query'],
+      onStart: (botInfo) => {
+        console.log(`[Bot] Successfully started @${botInfo.username}`);
+      },
+    })
+    .catch((err) => {
+      if (isShuttingDown) return;
+      const isConflict =
+        err?.error_code === 409 ||
+        err?.message?.includes('409') ||
+        err?.description?.includes('Conflict');
+
+      if (isConflict) {
+        console.warn('[Bot] Ignored 409 Conflict: waiting 5s to resume polling...');
+        setTimeout(startPolling, 5000);
+      } else {
+        console.error('[Bot] Polling error:', err.message || err);
+        setTimeout(startPolling, 3000);
+      }
+    });
+}
+
+startPolling();
 
 // Graceful shutdown
 const shutdown = () => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   console.log('[App] Shutting down gracefully...');
   bot.stop();
   process.exit(0);
