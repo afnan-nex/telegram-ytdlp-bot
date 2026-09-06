@@ -145,18 +145,28 @@ async function processDownload(ctx, url, options = {}) {
       if (downloadResult.isAudio) {
         await ctx.replyWithAudio(inputFile, {
           title: downloadResult.title,
+          duration: downloadResult.duration,
           caption: titleCaption,
           parse_mode: 'HTML',
           reply_parameters: { message_id: ctx.message?.message_id || ctx.msgId },
         });
       } else {
+        const videoOptions = {
+          caption: titleCaption,
+          parse_mode: 'HTML',
+          supports_streaming: true,
+          width: downloadResult.width,
+          height: downloadResult.height,
+          duration: downloadResult.duration,
+          reply_parameters: { message_id: ctx.message?.message_id || ctx.msgId },
+        };
+
+        if (downloadResult.thumbnailPath) {
+          videoOptions.thumbnail = new InputFile(downloadResult.thumbnailPath);
+        }
+
         try {
-          await ctx.replyWithVideo(inputFile, {
-            caption: titleCaption,
-            parse_mode: 'HTML',
-            supports_streaming: true,
-            reply_parameters: { message_id: ctx.message?.message_id || ctx.msgId },
-          });
+          await ctx.replyWithVideo(inputFile, videoOptions);
         } catch (videoErr) {
           console.warn('[Bot] replyWithVideo failed, falling back to replyWithDocument:', videoErr.message);
           await ctx.replyWithDocument(inputFile, {

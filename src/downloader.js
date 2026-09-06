@@ -5,55 +5,78 @@ import path from 'path';
 import { config } from './config.js';
 
 /**
- * Extracts metadata for a given URL without downloading the file.
- * @param {string} url
- * @returns {Promise<any>}
+ * Probes video file to extract width, height, and duration.
+ * @param {string} filePath
+ * @returns {Promise<{ width?: number, height?: number, duration?: number, codec?: string }>}
  */
-export async function extractMetadata(url) {
-  return new Promise((resolve, reject) => {
+export async function getVideoMetadata(filePath) {
+  return new Promise((resolve) => {
     const args = [
-      '--dump-single-json',
-      '--no-playlist',
-      '--no-warnings',
-      '--no-check-certificates',
-      url,
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height,duration,codec_name',
+      '-show_entries', 'format=duration',
+      '-of', 'json',
+      filePath,
     ];
 
-    const proc = spawn('yt-dlp', args);
+    const proc = spawn('ffprobe', args);
     let stdout = '';
-    let stderr = '';
 
     proc.stdout.on('data', (data) => {
       stdout += data.toString();
     });
 
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
     proc.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(stderr.trim() || `yt-dlp metadata extraction failed with code ${code}`));
+      if (code === 0) {
+        try {
+          const json = JSON.parse(stdout);
+          const stream = json.streams?.[0] || {};
+          const format = json.format || {};
+          const width = stream.width ? parseInt(stream.width, 10) : undefined;
+          const height = stream.height ? parseInt(stream.height, 10) : undefined;
+          const duration = Math.round(parseFloat(stream.duration || format.duration || 0)) || undefined;
+          const codec = stream.codec_name || undefined;
+          return resolve({ width, height, duration, codec });
+        } catch {}
       }
-      try {
-        const json = JSON.parse(stdout);
-        resolve(json);
-      } catch (err) {
-        reject(new Error(`Failed to parse yt-dlp metadata JSON: ${err.message}`));
-      }
+      resolve({});
     });
 
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
+    proc.on('error', () => {
+      resolve({});
     });
   });
 }
 
 /**
- * Downloads media from URL and returns file details.
+ * Generates a thumbnail image from the video.
+ * @param {string} videoPath
+ * @param {string} thumbnailPath
+ * @returns {Promise<boolean>}
+ */
+export async function generateThumbnail(videoPath, thumbnailPath) {
+  return new Promise((resolve) => {
+    const args = [
+      '-ss', '00:00:01',
+      '-i', videoPath,
+      '-vframes', '1',
+      '-q:v', '2',
+      '-y',
+      thumbnailPath,
+    ];
+
+    const proc = spawn('ffmpeg', args);
+    proc.on('close', (code) => resolve(code === 0));
+    proc.on('error', () => resolve(false));
+  });
+}
+
+/**
+ * Downloads media from URL and returns file details with full Telegram compatibility.
  * @param {string} url - Target media URL
  * @param {object} options - Options { audioOnly: boolean }
- * @returns {Promise<{ filePath: string, fileName: string, title: string, uploader: string, duration: number, fileSizeBytes: number, isAudio: boolean, dirPath: string, width?: number, height?: number }>}
+ * @returns {Promise<{ filePath: string, fileName: string, title: string, uploader: string, duration?: number, width?: number, height?: number, thumbnailPath?: string, fileSizeBytes: number, isAudio: boolean, dirPath: string }>}
  */
 export async function downloadMedia(url, options = {}) {
   const isAudio = Boolean(options.audioOnly);
@@ -73,13 +96,21 @@ export async function downloadMedia(url, options = {}) {
   ];
 
   if (isAudio) {
-    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  } else {
-    // Prefer best MP4 video + audio under file size limit, fallback to best MP4, then best
     args.push(
-      '-f',
-      `bestvideo[ext=mp4][filesize<?${config.maxFileSizeMB}M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<?${config.maxFileSizeMB}M]/best[filesize<?${config.maxFileSizeMB}M]/best`,
-      '--merge-output-format', 'mp4'
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '0'
+    );
+  } else {
+    // 1. Prioritize H.264 (AVC) and AAC audio so Telegram mobile/desktop players decode video properly
+    // 2. Transcode incompatible codecs (VP9/AV1/HEVC) to H.264 MP4 with yuv420p and +faststart
+    args.push(
+      '-S', 'vcodec:h264,fps,res,acodec:m4a',
+      '-f', `bestvideo[vcodec^=avc1][filesize<?${config.maxFileSizeMB}M]+bestaudio[acodec^=mp4a]/bestvideo[ext=mp4][filesize<?${config.maxFileSizeMB}M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<?${config.maxFileSizeMB}M]/best[filesize<?${config.maxFileSizeMB}M]/best`,
+      '--merge-output-format', 'mp4',
+      '--recode-video', 'mp4',
+      '--postprocessor-args', 'Merger+ffmpeg:-movflags +faststart',
+      '--postprocessor-args', 'VideoConvertor:-c:v libx264 -pix_fmt yuv420p -preset fast -crf 23 -c:a aac -movflags +faststart'
     );
   }
 
@@ -107,7 +138,7 @@ export async function downloadMedia(url, options = {}) {
         }
 
         // Find the main media file (ignoring any leftover .part, .temp files)
-        const mediaFile = files.find((f) => !f.endsWith('.part') && !f.endsWith('.ytdl'));
+        const mediaFile = files.find((f) => !f.endsWith('.part') && !f.endsWith('.ytdl') && !f.endsWith('.jpg') && !f.endsWith('.png'));
         if (!mediaFile) {
           return reject(new Error('Media file not found after download completed.'));
         }
@@ -121,12 +152,33 @@ export async function downloadMedia(url, options = {}) {
 
         const title = path.parse(mediaFile).name;
 
+        let width;
+        let height;
+        let duration;
+        let thumbnailPath;
+
+        if (!isAudio) {
+          const meta = await getVideoMetadata(filePath);
+          width = meta.width;
+          height = meta.height;
+          duration = meta.duration;
+
+          const thumbFile = path.join(dirPath, 'thumb.jpg');
+          const thumbCreated = await generateThumbnail(filePath, thumbFile);
+          if (thumbCreated) {
+            thumbnailPath = thumbFile;
+          }
+        }
+
         resolve({
           filePath,
           fileName: mediaFile,
           title,
           uploader: '',
-          duration: 0,
+          duration,
+          width,
+          height,
+          thumbnailPath,
           fileSizeBytes: stats.size,
           isAudio,
           dirPath,
